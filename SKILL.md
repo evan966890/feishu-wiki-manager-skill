@@ -194,15 +194,85 @@ await client.request('POST',
   { document_revision_id: -1 });
 ```
 
+### 6. Image Handling (Download, Upload, and Fixing Broken Images)
+
+**Root cause of broken images**: When documents are created by importing markdown, image references like `![Image](image_token:xxx)` get stored as TEXT blocks (block_type=2), NOT as proper image blocks (block_type=27). The page renders these as raw text instead of images.
+
+**Detecting broken images**:
+
+```javascript
+for (const block of blocks) {
+  const els = block.text?.elements || [];
+  const content = els.map(e => e.text_run?.content || '').join('');
+  const match = content.match(/^!\[(?:Image|image)?\]\(image_token:([a-zA-Z0-9_-]+)\)$/);
+  if (match) {
+    brokenImages.push({ blockId: block.block_id, parentId: block.parent_id, imageToken: match[1] });
+  }
+}
+```
+
+**Downloading images** — use direct download (more reliable than batch_get_tmp_download_url):
+
+```javascript
+const res = await axios.get(`${BASE}/drive/v1/medias/${imageToken}/download`, {
+  headers: { Authorization: `Bearer ${token}` },
+  responseType: 'arraybuffer', maxRedirects: 5
+});
+```
+
+**Fixing broken images** — 3-step process (cannot set token during creation):
+
+```javascript
+import FormData from 'form-data';
+
+// Step 1: Delete the text block
+await client.request('DELETE',
+  `/docx/v1/documents/${docId}/blocks/${parentId}/children/batch_delete`,
+  { start_index: idx, end_index: idx + 1 }, { document_revision_id: -1 });
+
+// Step 2: Create EMPTY image block
+const createRes = await client.request('POST',
+  `/docx/v1/documents/${docId}/blocks/${parentId}/children`,
+  { children: [{ block_type: 27, image: {} }], index: idx },
+  { document_revision_id: -1 });
+const imageBlockId = createRes.children[0].block_id;
+
+// Step 3: Upload image with parent_node = imageBlockId (NOT docId!)
+const form = new FormData();
+form.append('file_name', `${token}.png`);
+form.append('parent_type', 'docx_image');
+form.append('parent_node', imageBlockId);
+form.append('size', String(imgBuffer.length));
+form.append('file', imgBuffer, { filename: `${token}.png`, contentType: 'image/png' });
+const upRes = await axios.post(`${BASE}/drive/v1/medias/upload_all`, form, {
+  headers: { ...form.getHeaders(), Authorization: `Bearer ${tenantToken}` }
+});
+
+// Step 4: PATCH block to bind the uploaded image
+await client.request('PATCH',
+  `/docx/v1/documents/${docId}/blocks/${imageBlockId}`,
+  { replace_image: { token: upRes.data.data.file_token } },
+  { document_revision_id: -1 });
+```
+
+**CRITICAL**: Process blocks from bottom to top (descending index) to keep indices stable. 403 on download means the image belongs to another user's personal drive — ask author to re-insert.
+
+### Image-Safe Document Workflow
+
+When downloading documents for local backup, always use `imageDir` to capture images. When re-uploading, use the 3-step image flow for each image. **NEVER** import markdown containing `image_token:xxx` references — they become text, not images.
+
 ## Critical Pitfalls (Learned from Production)
 
 ### API Errors
 
 | Error Code | Meaning | Solution |
 |-----------|---------|----------|
-| 1770001 | Invalid param | Check block_type numbers; bullet=12 not 11 |
+| 1770001 | Invalid param | Check block_type numbers; bullet=12 not 11. For images: cannot set token during creation — use 3-step flow |
+| 1770013 | Resource relation mismatch | Image token not associated with document. Upload with parent_node=imageBlockId, not docId |
 | 1770024 | Too many writes | Add 1.5-3s delay between batches; reduce batch size to 10-15 |
 | 99991679 | Permission denied | For bitable: use tenant_access_token instead of user token |
+| 403 on media download | No access to file | Image belongs to another user's drive; ask author to re-insert |
+| 404 on DELETE children | Wrong endpoint | Must use `.../children/batch_delete`, NOT `.../children` |
 | 404 on wiki node PUT | No rename API | Use PATCH on page block to change document title |
 
 ### Block Type Numbers

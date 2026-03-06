@@ -21,7 +21,7 @@
 | 15 | quote | Quote block | |
 | 16 | todo | Todo/checkbox | style.done: true/false |
 | 17 | divider | Divider line | Does NOT work via create API — use empty text block |
-| 18 | image | Image | Requires image_token |
+| 27 | image | Image | 3-step creation: create empty → upload media → PATCH replace_image |
 | 22 | view | Embedded view | |
 
 ## Text Element Styles
@@ -118,3 +118,44 @@ Query: page_size=500
 ```
 
 Returns paginated. Root block (block_type=1) has same ID as document.
+
+## Image Operations
+
+### Download image (direct — preferred)
+
+```
+GET /drive/v1/medias/{file_token}/download
+Auth: tenant_access_token or user_access_token
+Response: binary stream (arraybuffer)
+Rate limit: 5 QPS
+```
+
+### Upload image to document
+
+```
+POST /drive/v1/medias/upload_all
+Content-Type: multipart/form-data
+Fields:
+  file_name: "image.png"
+  parent_type: "docx_image"        # for new docs; "doc_image" for old docs
+  parent_node: "{image_block_id}"  # MUST be the image block ID, NOT the document ID
+  size: "12345"
+  file: <binary>
+Rate limit: 5 QPS, max 20MB per file
+```
+
+### Update image block token
+
+```
+PATCH /docx/v1/documents/{doc_id}/blocks/{image_block_id}
+Query: document_revision_id=-1
+Body: { "replace_image": { "token": "{file_token}" } }
+```
+
+### Complete image block creation flow
+
+1. Create empty: `POST .../children` with `{ block_type: 27, image: {} }`
+2. Upload: `POST /drive/v1/medias/upload_all` with `parent_node = imageBlockId`
+3. Bind: `PATCH .../blocks/{imageBlockId}` with `{ replace_image: { token } }`
+
+**Why 3 steps?** `{ block_type: 27, image: { token: "xxx" } }` returns error 1770001. Tokens can only be set via PATCH after creation.
