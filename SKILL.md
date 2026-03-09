@@ -294,8 +294,11 @@ Common mistake: using wrong block_type. The correct mapping:
 - Document block writes: max ~30 blocks before hitting 1770024
 - Solution: batch 15 blocks at a time, 1.5s delay between batches
 - For large documents (50+ blocks): write in 3-4 batches with 3s delays
-- After deleting + rewriting a document, wait 10-15s before the next write operation on the same doc
-- Bitable record writes: 10 per batch, 300ms delay is sufficient
+- Bitable record writes: 50 per batch for batch_create, 300ms delay
+- Bitable record reads: page_size=100 but actual pages may be tiny (2-3 records) when records have URL fields
+- Bitable record deletes: up to 500 IDs per batch_delete call
+- Media download/upload: 5 QPS each
+- **Rebuild > Incremental update**: For tables with URL/link fields, delete-all + re-insert is 10x faster than read-match-update
 
 ### Rich Text Field Format
 
@@ -330,15 +333,18 @@ Links in bullet items need bold + link style in `text_element_style`:
 Organize wiki content in numbered top-level folders for easy navigation:
 
 ```
-00 Department submission portal (low-friction input)
-01-05 Methodology and standards (by maturity level)
-06 Practice zone (hands-on records)
-07 Case studies and experience sharing
+00 Department submission portal (by department)         ← department dimension
+01-05 Methodology and standards (by maturity level)     ← stage dimension
+06 Practice zone (framework-specific, e.g. VAF)         ← technology dimension
+07 Case studies (by scenario: greenfield/legacy/prototype/tooling/sharing) ← scenario dimension
 08 FAQ
 09 Training and meetings
 10 Weekly reports
 11 Glossary / terminology
+Summary Bitable (consolidated tracking across all departments)
 ```
+
+**Avoid dimension overlap**: 00 = by department, 07 = by scenario. Same document can exist in multiple places (use link documents if shortcuts are unavailable).
 
 ### Department Tracking Table (Human-Machine Shared)
 
@@ -351,13 +357,25 @@ Each department gets a Bitable tracking table where humans and automation coexis
 
 Machine writes use field-level PATCH (never overwrites the entire row). When machine-detected values differ from human input, the discrepancy is flagged — not overwritten — awaiting human confirmation.
 
+### Wiki Restructuring Pattern
+
+Move nodes between parents: `POST /wiki/v2/spaces/{space}/nodes/{node}/move` with `{ target_parent_token }`. This preserves all content and images. Update parent documents with new child links after moving. Wiki shortcuts (`node_type: 'shortcut'`) may not work in all spaces — create link documents as fallback.
+
+### Bitable Summary/Aggregation Pattern
+
+Create a consolidated table from multiple department tables:
+1. Create bitable node at wiki root
+2. Add a "Department" single-select field
+3. For each dept: read all records → transform → batch_create to summary
+4. **Include ALL fields (especially URLs) on first insert** — updating URL fields later requires reading back all records, which is extremely slow due to tiny page sizes
+
 ### Data Migration Pattern
 
 Source table → field mapping → target table:
 1. Read source records with department/category filter
 2. Parse rich text fields (names stored as JSON arrays, deliverables as mention objects)
 3. Extract URLs and infer status (has URL → done, has text → in progress, empty → not started)
-4. Batch write to target with proper field names
+4. Batch write to target with proper field names — include URL/link fields in the FIRST write
 5. Verify record counts match
 
 ## Reusable Scripts
