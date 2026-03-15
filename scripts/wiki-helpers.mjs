@@ -211,6 +211,84 @@ export async function createWikiManager(opts) {
     return updated;
   }
 
+  // --- IM Image & File operations (use tenant token) ---
+
+  async function uploadChatImage(filePath) {
+    const T = await getTenantToken();
+    const { default: FormData } = await import('form-data');
+    const { createReadStream } = await import('fs');
+    const form = new FormData();
+    form.append('image_type', 'message');
+    form.append('image', createReadStream(filePath));
+    const r = await fetch(`${BASE}/im/v1/images`, {
+      method: 'POST',
+      headers: { ...form.getHeaders(), Authorization: `Bearer ${T}` },
+      body: form
+    });
+    const data = await r.json();
+    if (data.code !== 0) throw new Error(`Upload chat image: ${data.code} ${data.msg}`);
+    return data.data.image_key;
+  }
+
+  async function sendImageMessage(receiveId, imageKey, receiveIdType = 'open_id') {
+    const T = await getTenantToken();
+    const r = await fetch(`${BASE}/im/v1/messages?receive_id_type=${receiveIdType}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${T}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ receive_id: receiveId, msg_type: 'image', content: JSON.stringify({ image_key: imageKey }) })
+    });
+    const data = await r.json();
+    if (data.code !== 0) throw new Error(`Send image: ${data.code} ${data.msg}`);
+    return data.data;
+  }
+
+  async function sendImageFile(receiveId, filePath, receiveIdType = 'open_id') {
+    const imageKey = await uploadChatImage(filePath);
+    return sendImageMessage(receiveId, imageKey, receiveIdType);
+  }
+
+  async function replyWithImage(messageId, imageKey) {
+    const T = await getTenantToken();
+    const r = await fetch(`${BASE}/im/v1/messages/${messageId}/reply`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${T}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ msg_type: 'image', content: JSON.stringify({ image_key: imageKey }) })
+    });
+    const data = await r.json();
+    if (data.code !== 0) throw new Error(`Reply image: ${data.code} ${data.msg}`);
+    return data.data;
+  }
+
+  async function uploadChatFile(filePath, fileName) {
+    const T = await getTenantToken();
+    const { default: FormData } = await import('form-data');
+    const { createReadStream } = await import('fs');
+    const form = new FormData();
+    form.append('file_type', 'stream');
+    form.append('file_name', fileName || filePath.split('/').pop());
+    form.append('file', createReadStream(filePath));
+    const r = await fetch(`${BASE}/im/v1/files`, {
+      method: 'POST',
+      headers: { ...form.getHeaders(), Authorization: `Bearer ${T}` },
+      body: form
+    });
+    const data = await r.json();
+    if (data.code !== 0) throw new Error(`Upload chat file: ${data.code} ${data.msg}`);
+    return data.data.file_key;
+  }
+
+  async function sendFileMessage(receiveId, fileKey, receiveIdType = 'open_id') {
+    const T = await getTenantToken();
+    const r = await fetch(`${BASE}/im/v1/messages?receive_id_type=${receiveIdType}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${T}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ receive_id: receiveId, msg_type: 'file', content: JSON.stringify({ file_key: fileKey }) })
+    });
+    const data = await r.json();
+    if (data.code !== 0) throw new Error(`Send file: ${data.code} ${data.msg}`);
+    return data.data;
+  }
+
   return {
     spaceId,
     // Wiki
@@ -220,6 +298,9 @@ export async function createWikiManager(opts) {
     // Bitable
     btApi, getTableId, configureBitableFields,
     searchRecords, batchCreateRecords, batchUpdateRecords,
+    // IM Images & Files
+    uploadChatImage, sendImageMessage, sendImageFile,
+    replyWithImage, uploadChatFile, sendFileMessage,
     // Block constructors
     el, textBlock, h2Block, h3Block, bulletBlock, orderedBlock, codeBlock,
     // Styles

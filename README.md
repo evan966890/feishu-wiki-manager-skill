@@ -9,6 +9,7 @@ An AI skill for programmatic management of Feishu (Lark) wiki knowledge bases.
 - **Bitable Configuration** — Create fields, batch-create/update records, search with filters
 - **Data Migration** — Move records between Bitable tables with field mapping and rich text parsing
 - **Node Health Scanning** — Detect empty parent nodes that should link to their children, and auto-fix them
+- **IM Image & File Sending** — Upload and send images/files via Feishu messages (screenshot → upload → send two-step flow)
 
 ## Installation
 
@@ -38,6 +39,9 @@ The skill is a standard markdown-based skill. Place `SKILL.md` where your IDE re
    - `wiki:wiki` (wiki read/write)
    - `docx:document` (document read/write)
    - `base:app:*`, `base:table:*`, `base:field:*`, `base:record:*` (bitable operations)
+   - `im:message:send_as_bot` (send messages as bot)
+   - `im:image` (upload images for chat)
+   - `im:file` (upload files for chat)
 
 2. App credentials (appId + appSecret) accessible to your scripts
 
@@ -49,6 +53,7 @@ The skill is a standard markdown-based skill. Place `SKILL.md` where your IDE re
 - **Batch 15 blocks max per write** with 1.5s delays to avoid error 1770024
 - **Wiki node rename** requires PATCH on the page block, not PUT on the wiki node
 - **Bitable text fields return JSON arrays** `[{"text":"value","type":"text"}]`, not plain strings
+- **IM images ≠ document images** — use `/im/v1/images` (returns `image_key`) NOT `/drive/v1/medias/upload_all` (returns `file_token`)
 
 ## File Structure
 

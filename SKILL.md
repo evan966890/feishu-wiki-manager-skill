@@ -261,6 +261,165 @@ await client.request('PATCH',
 
 When downloading documents for local backup, always use `imageDir` to capture images. When re-uploading, use the 3-step image flow for each image. **NEVER** import markdown containing `image_token:xxx` references — they become text, not images.
 
+### 7. Sending Images via Feishu Messages (IM API)
+
+**Use case**: Bot takes a screenshot or generates an image, then sends it to a user/group via Feishu chat.
+
+**Two-step flow** (screencapture → upload → send):
+
+```javascript
+import FormData from 'form-data';
+import fs from 'fs';
+
+// Step 1: Upload image to get image_key
+async function uploadChatImage(tenantToken, filePath) {
+  const form = new FormData();
+  form.append('image_type', 'message');
+  form.append('image', fs.createReadStream(filePath));
+  const res = await fetch('https://open.feishu.cn/open-apis/im/v1/images', {
+    method: 'POST',
+    headers: { ...form.getHeaders(), Authorization: `Bearer ${tenantToken}` },
+    body: form
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`Upload image failed: ${data.code} ${data.msg}`);
+  return data.data.image_key;
+}
+
+// Step 2: Send image message
+async function sendImageMessage(tenantToken, receiveId, imageKey, receiveIdType = 'open_id') {
+  const res = await fetch(
+    `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${receiveIdType}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tenantToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      receive_id: receiveId,
+      msg_type: 'image',
+      content: JSON.stringify({ image_key: imageKey })
+    })
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`Send image failed: ${data.code} ${data.msg}`);
+  return data.data;
+}
+```
+
+**One-liner combo** (file path → send):
+
+```javascript
+async function sendImageFile(tenantToken, receiveId, filePath, receiveIdType = 'open_id') {
+  const imageKey = await uploadChatImage(tenantToken, filePath);
+  return sendImageMessage(tenantToken, receiveId, imageKey, receiveIdType);
+}
+```
+
+**Send image in rich text (post) message** — for mixing text and images:
+
+```javascript
+async function sendPostWithImages(tenantToken, receiveId, title, contentParts, receiveIdType = 'open_id') {
+  // contentParts: array of arrays, each inner array is a line
+  // text part: { tag: 'text', text: '...' }
+  // image part: { tag: 'img', image_key: '...' }
+  const res = await fetch(
+    `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${receiveIdType}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tenantToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      receive_id: receiveId,
+      msg_type: 'post',
+      content: JSON.stringify({ zh_cn: { title, content: contentParts } })
+    })
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`Send post failed: ${data.code} ${data.msg}`);
+  return data.data;
+}
+
+// Example: send text + image combo
+const imageKey = await uploadChatImage(token, '/tmp/screenshot.png');
+await sendPostWithImages(token, openId, '截图报告', [
+  [{ tag: 'text', text: '以下是当前页面截图：' }],
+  [{ tag: 'img', image_key: imageKey }],
+  [{ tag: 'text', text: '请查收 ✅' }]
+]);
+```
+
+**Reply to a message with image** — attach image to an existing thread:
+
+```javascript
+async function replyWithImage(tenantToken, messageId, imageKey) {
+  const res = await fetch('https://open.feishu.cn/open-apis/im/v1/messages/' + messageId + '/reply', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tenantToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      msg_type: 'image',
+      content: JSON.stringify({ image_key: imageKey })
+    })
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`Reply image failed: ${data.code} ${data.msg}`);
+  return data.data;
+}
+```
+
+**Required permissions**:
+- `im:message:send_as_bot` — send messages as bot
+- `im:image` — upload images for messaging
+
+**Common errors**:
+
+| Error Code | Meaning | Solution |
+|-----------|---------|----------|
+| 230001 | Bot not in chat | Bot must be added to group chat first |
+| 230002 | No message permission | Add `im:message:send_as_bot` scope |
+| 99991668 | Image upload failed | Check file size (max 10MB), format (png/jpg/gif/bmp/webp), and `im:image` scope |
+| 99991672 | Permission denied | Missing `im:image` or `im:message` scope |
+
+**Key differences from document images**:
+- IM images use `POST /im/v1/images` (NOT `/drive/v1/medias/upload_all`)
+- IM images return `image_key` (NOT `file_token`)
+- IM images use `image_type: "message"` (NOT `parent_type: "docx_image"`)
+- No 3-step flow needed — upload once, send directly
+
+### 8. Sending Files via Feishu Messages
+
+```javascript
+// Upload file for chat
+async function uploadChatFile(tenantToken, filePath, fileName) {
+  const form = new FormData();
+  form.append('file_type', 'stream');  // or: opus, mp4, pdf, doc, xls, ppt
+  form.append('file_name', fileName || filePath.split('/').pop());
+  form.append('file', fs.createReadStream(filePath));
+  const res = await fetch('https://open.feishu.cn/open-apis/im/v1/files', {
+    method: 'POST',
+    headers: { ...form.getHeaders(), Authorization: `Bearer ${tenantToken}` },
+    body: form
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`Upload file failed: ${data.code} ${data.msg}`);
+  return data.data.file_key;
+}
+
+// Send file message
+async function sendFileMessage(tenantToken, receiveId, fileKey, receiveIdType = 'open_id') {
+  const res = await fetch(
+    `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${receiveIdType}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tenantToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      receive_id: receiveId,
+      msg_type: 'file',
+      content: JSON.stringify({ file_key: fileKey })
+    })
+  });
+  const data = await res.json();
+  if (data.code !== 0) throw new Error(`Send file failed: ${data.code} ${data.msg}`);
+  return data.data;
+}
+```
+
+**Required permission**: `im:file`
+
 ## Critical Pitfalls (Learned from Production)
 
 ### API Errors
