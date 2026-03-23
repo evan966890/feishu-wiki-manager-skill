@@ -65,12 +65,20 @@ function parseTextField(field) {
 
 ### URL (type 15)
 ```javascript
-// Write
-{ 'Link': { link: 'https://example.com', text: 'Example' } }
+// Write — MUST use array format (not bare object!)
+{ 'Link': [{ link: 'https://example.com', text: 'Example' }] }
 
 // Read
 { 'Link': { link: 'https://example.com', text: 'Example' } }
+// or (multi-value):
+{ 'Link': [{ link: 'https://a.com', text: 'A' }, { link: 'https://b.com', text: 'B' }] }
 ```
+
+**CRITICAL**: Writing a bare `{ link, text }` object works, but writing a plain string to a URL field
+causes `URLFieldConvFail` (error 1254068). Always use `[{text, link}]` array format for URL writes.
+
+Conversely, writing `[{text, link}]` array to a **Text** field causes `TextFieldConvFail` (error 1254060).
+Since you may not know the field type in advance, use the `safeUpdateBitableRecord` pattern (see main SKILL.md).
 
 ### Date (type 5)
 ```javascript
@@ -133,13 +141,28 @@ Pagination: check `has_more` and pass `page_token` in next request body.
 POST /bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create
 Body: { records: [{ fields: { 'Name': 'A' } }, { fields: { 'Name': 'B' } }] }
 ```
-Max 10 records per batch. Add 300ms delay between batches.
+Max **10** records per batch (larger batches cause intermittent failures). Add 300ms delay between batches.
 
 ### Batch update records
 ```
 POST /bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_update
 Body: { records: [{ record_id: 'recXxx', fields: { 'Status': 'Done' } }] }
 ```
+Max 10 records per batch.
+
+### Single record update (PUT)
+```
+PUT /bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}
+Body: { fields: { 'Status': 'Done', '当前等级': 'P1 Demo实战' } }
+```
+**WARNING**: Omitted fields may be cleared. Always re-send existing URL field values (see `preserveUrlFields` pattern in main SKILL.md).
+
+### Batch delete records
+```
+POST /bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_delete
+Body: { records: ['recXxx', 'recYyy'] }
+```
+Max 500 record IDs per call.
 
 ### Single record create
 ```

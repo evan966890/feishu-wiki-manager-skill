@@ -429,6 +429,9 @@ async function sendFileMessage(tenantToken, receiveId, fileKey, receiveIdType = 
 | 1770001 | Invalid param | Check block_type numbers; bullet=12 not 11. For images: cannot set token during creation — use 3-step flow |
 | 1770013 | Resource relation mismatch | Image token not associated with document. Upload with parent_node=imageBlockId, not docId |
 | 1770024 | Too many writes | Add 1.5-3s delay between batches; reduce batch size to 10-15 |
+| 1254060 | TextFieldConvFail | Writing URL-array `[{text,link}]` to a text-type field. Retry with plain-string format (join with `\n`) |
+| 1254068 | URLFieldConvFail | Writing plain string to a URL-type field. Must use `[{text,link}]` array format |
+| 10014 / 99991661 / 99991663 | Token expired/invalid | Invalidate token cache and re-authenticate on next request |
 | 99991679 | Permission denied | For bitable: use tenant_access_token instead of user token |
 | 403 on media download | No access to file | Image belongs to another user's drive; ask author to re-insert |
 | 404 on DELETE children | Wrong endpoint | Must use `.../children/batch_delete`, NOT `.../children` |
@@ -447,17 +450,20 @@ Common mistake: using wrong block_type. The correct mapping:
 - **Wiki API** (create/list/delete nodes): use user_access_token
 - **Docx API** (read/write blocks): use user_access_token
 - **Bitable API** (tables/fields/records): use **tenant_access_token** — user token often missing bitable scopes even when permissions are granted
+- **Token caching**: Cache tenant_access_token with 5-minute early expiry buffer. Auto-invalidate on auth error codes (10014, 99991661, 99991663) so next request re-authenticates
+- **Token refresh with retry**: Use exponential backoff (1s → 2s → 8s) with max 3 retries for token acquisition — network blips should not crash the sync
 
 ### Rate Limits
 
 - Document block writes: max ~30 blocks before hitting 1770024
 - Solution: batch 15 blocks at a time, 1.5s delay between batches
 - For large documents (50+ blocks): write in 3-4 batches with 3s delays
-- Bitable record writes: 50 per batch for batch_create, 300ms delay
+- Bitable record writes: **10 per batch** for batch_create (not 50 — larger batches cause intermittent failures), 300ms delay
 - Bitable record reads: page_size=100 but actual pages may be tiny (2-3 records) when records have URL fields
 - Bitable record deletes: up to 500 IDs per batch_delete call
 - Media download/upload: 5 QPS each
 - **Rebuild > Incremental update**: For tables with URL/link fields, delete-all + re-insert is 10x faster than read-match-update
+- **Pagination safety**: Always set a MAX_PAGES guard (e.g. 100) to prevent infinite loops when `has_more` never becomes false due to API bugs
 
 ### Rich Text Field Format
 
@@ -484,6 +490,173 @@ Links in bullet items need bold + link style in `text_element_style`:
 ```javascript
 { bold: true, link: { url: 'https://your-domain.feishu.cn/wiki/xxx' } }
 ```
+
+## Production Patterns (Real-World: 300+ Members, Multi-Department Bitables)
+
+### Bitable URL Field Type Handling (CRITICAL)
+
+Bitable has two field types that look similar but behave differently: **Text (type 1)** and **URL (type 15)**. Different department tables may use different types for the same logical field. You **must** handle both:
+
+```javascript
+/**
+ * Normalize a Bitable URL-type field value to [{text, link}] array format.
+ * Handles: arrays, strings, null/undefined.
+ * Prevents URLFieldConvFail (1254068) when writing to URL-type fields.
+ */
+function normalizeUrlFieldValue(existing, newUrl) {
+  const items = [];
+  if (Array.isArray(existing)) {
+    for (const item of existing) {
+      const link = typeof item?.link === 'string' ? item.link : '';
+      const text = typeof item?.text === 'string' ? item.text : link;
+      if (link) items.push({ text, link });
+    }
+  } else if (typeof existing === 'string' && existing.trim()) {
+    for (const line of existing.split(/[\n\r]+/)) {
+      const trimmed = line.trim();
+      if (trimmed && /^https?:\/\//i.test(trimmed))
+        items.push({ text: trimmed, link: trimmed });
+    }
+  }
+  if (newUrl) items.push({ text: newUrl, link: newUrl });
+  return items;
+}
+
+/**
+ * Defensive wrapper: try [{text,link}] array first; on TextFieldConvFail (1254060),
+ * retry with plain-string format for those fields.
+ */
+async function safeUpdateBitableRecord(client, appToken, tableId, recordId, fields) {
+  try {
+    await client.updateBitableRecord(appToken, tableId, recordId, fields);
+  } catch (err) {
+    if (err.message.includes('TextFieldConvFail') || err.message.includes('1254060')) {
+      const fallback = {};
+      for (const [key, val] of Object.entries(fields)) {
+        if (Array.isArray(val) && val[0]?.link) {
+          fallback[key] = val.map(i => i.link || i.text || '').filter(Boolean).join('\n');
+        } else if (Array.isArray(val) && val.length === 0) {
+          fallback[key] = '';  // Empty array → empty string for text fields
+        } else {
+          fallback[key] = val;
+        }
+      }
+      await client.updateBitableRecord(appToken, tableId, recordId, fallback);
+    } else throw err;
+  }
+}
+```
+
+**Key rule**: When updating a record that has URL fields, you MUST re-send all existing URL field values — Bitable **clears omitted fields** during PUT updates:
+
+```javascript
+function preserveUrlFields(recordFields, urlFieldNames) {
+  const preserved = {};
+  for (const field of urlFieldNames) {
+    const val = recordFields[field];
+    if (val !== undefined && val !== null)
+      preserved[field] = Array.isArray(val) ? normalizeUrlFieldValue(val) : val;
+  }
+  return preserved;
+}
+
+// Usage: always spread preserveUrlFields into the update payload
+await safeUpdateBitableRecord(client, appToken, tableId, recordId, {
+  ...preserveUrlFields(record.fields),
+  'Level': 'P1 Beginner',
+});
+```
+
+### SingleSelect Labels Must Be Exact
+
+When writing to SingleSelect fields (type 3), the value must **exactly match** an option defined in the table. Use long-form labels, not abbreviations:
+
+```javascript
+// Example: your table's SingleSelect options
+const STAGE_SELECT_LABELS = {
+  P1: 'P1 Beginner',       // must match the option text in Bitable exactly
+  P2: 'P2 Intermediate',
+  P3: 'P3 Advanced',
+  P4: 'P4 Expert',
+};
+```
+
+### Multi-Department Sub-Table Architecture
+
+Pattern for managing N independent Bitable tables (one per department) with a central "main table" (总表):
+
+```
+Sub-table (子表) × N ──sync──→ Main table (总表)
+    ↑                                ↓
+  writeback                     frontend reads
+    ↑                                ↓
+  Website submit ────────→ Sub-table FIRST, then main table (fire-and-forget)
+```
+
+- **Sub-tables are the Single Source of Truth (SSOT)** — never modify main table directly
+- **Reconcile pattern**: compare main table against all sub-tables; members in sub-tables but missing from main are added as stubs
+- **Cross-department duplicate names**: use `name::department` as composite Map key, not just name — same Chinese name in two departments is common (e.g., 张伟 in both Sales and Engineering)
+
+```javascript
+// Two-layer matching for cross-department safety
+const byNameDept = new Map();  // Primary: "张伟::Sales"
+const byName = new Map();      // Fallback: "张伟" (first occurrence)
+for (const d of deliverables) {
+  if (d.department) byNameDept.set(`${d.chineseName}::${d.department}`, d);
+  if (!byName.has(d.chineseName)) byName.set(d.chineseName, d);
+}
+// Match: try exact first, then fallback
+const match = (member.department
+  ? byNameDept.get(`${member.chineseName}::${member.department}`)
+  : null) ?? byName.get(member.chineseName);
+```
+
+### Field Name Fallback Pattern
+
+Different Bitable tables may use different column names for the same logical field. Always try multiple names:
+
+```javascript
+const chineseName = toStringValue(
+  fields['姓名'] ?? fields['中文名'] ?? fields['chineseName'] ?? fields['ChineseName']
+);
+const stage = toStringValue(
+  fields['当前阶段'] ?? fields['当前等级'] ?? fields['阶段'] ?? fields['等级'] ??
+  fields['currentStage'] ?? fields['stage'] ?? fields['Stage']
+);
+```
+
+### Rate Limiting with Token Bucket + Adaptive Throttler
+
+For production services making continuous Bitable API calls, a simple `setTimeout` is insufficient. Use a token bucket with adaptive throttling:
+
+```javascript
+class TokenBucket {
+  constructor(config) { this.tokens = config.maxTokens; this.lastRefill = Date.now(); }
+  async acquire() { /* refill tokens based on elapsed time, queue if empty */ }
+}
+class AdaptiveThrottler {
+  recordSuccess() { this.consecutiveErrors = 0; }
+  recordError() { this.consecutiveErrors++; }
+  getExtraDelay() { return Math.min(this.consecutiveErrors * 500, 5000); }
+}
+// Combine: acquire token → apply extra delay if recent errors → execute
+```
+
+### Credential Resolution Chain
+
+For server-side services, support multiple credential sources with fallback:
+
+```
+1. Explicit config (POST /api/feishu/config) — highest priority
+2. Environment variables (FEISHU_APP_ID / FEISHU_APP_SECRET) — for Docker/CI
+3. ~/.feishu2md/config.json — local dev fallback
+```
+
+### `includes('正式')` Pitfall
+
+Chinese substring matching with `.includes()` is treacherous:
+- `'非正式'.includes('正式')` → `true` (matches substring!)
+- Fix: use `=== '正式员工'` exact match, or add exclusion: `includes('正式') && !includes('非正式')`
 
 ## Design Patterns
 

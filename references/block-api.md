@@ -21,8 +21,9 @@
 | 15 | quote | Quote block | |
 | 16 | todo | Todo/checkbox | style.done: true/false |
 | 17 | divider | Divider line | Does NOT work via create API — use empty text block |
-| 27 | image | Image | 3-step creation: create empty → upload media → PATCH replace_image |
+| 19 | callout | Callout/highlight block | Container block — add child text blocks inside it |
 | 22 | view | Embedded view | |
+| 27 | image | Image | 3-step creation: create empty → upload media → PATCH replace_image |
 
 ## Text Element Styles
 
@@ -150,6 +151,37 @@ Rate limit: 5 QPS, max 20MB per file
 PATCH /docx/v1/documents/{doc_id}/blocks/{image_block_id}
 Query: document_revision_id=-1
 Body: { "replace_image": { "token": "{file_token}" } }
+```
+
+### Create callout block (block_type 19)
+
+Callout blocks are container blocks — create the callout first, then add child text blocks inside.
+
+```
+POST /docx/v1/documents/{doc_id}/blocks/{parent_block_id}/children
+Body: {
+  children: [{
+    block_type: 19,
+    callout: {
+      background_color: 2,  // 1=Red, 2=Blue, 3=Green, 4=Yellow, 5=Purple, 6=Grey
+      border_color: 5,      // Same enum as background
+      emoji_id: "bulb"      // 💡 emoji identifier
+    }
+  }],
+  index: -1  // -1 = append at end
+}
+```
+
+Then add text inside the callout:
+
+```
+POST /docx/v1/documents/{doc_id}/blocks/{callout_block_id}/children
+Body: {
+  children: [{
+    block_type: 2,
+    text: { elements: [{ text_run: { content: "Highlighted content", text_element_style: { bold: true, ... } } }] }
+  }]
+}
 ```
 
 ### Complete image block creation flow
