@@ -15,6 +15,39 @@ Built from real production experience managing a 100+ node knowledge base with 1
 - A FeishuClient or equivalent HTTP wrapper that can call `https://open.feishu.cn/open-apis/`
 - Required Feishu app permissions: `wiki:wiki`, `docx:document`, `base:app:*`, `base:table:*`, `base:field:*`, `base:record:*`
 
+## Wiki / Docx Operational Defaults
+
+Apply these defaults before running knowledge-base workflows:
+
+1. **User token first for Wiki / Docx**
+   - Wiki node CRUD, doc reading, doc title edits, and block writing should default to `user_access_token`.
+   - If your runtime manages user OAuth, validate or refresh the user token before work.
+   - If the user token is missing or expired, start the user authorization flow first instead of probing with tenant credentials.
+
+2. **Bitable is the explicit exception**
+   - For real Bitable table / field / record APIs, prefer `tenant_access_token` when the deployment or permissions require it.
+   - Do not blindly force user token on Bitable calls that are known to fail with scope issues.
+
+3. **Node creation requires `node_type: 'origin'`**
+   - Omitting it causes 400-level failures on wiki node creation.
+
+4. **Renaming goes through Docx, not Wiki**
+   - To change a document title, PATCH the page block.
+   - `block_id = obj_token = document_id` for the root page block.
+
+5. **Moving an existing cloud document into Wiki is two-step**
+   - First sign the document into the wiki.
+   - Then move the resulting node to the correct parent.
+
+6. **Read by `obj_token`, not `node_token`**
+   - `node_token` identifies the wiki tree node.
+   - `obj_token` identifies the actual document / sheet / bitable object.
+   - Plain content reads can use raw content or equivalent quick-read endpoints; structured reads must still follow the `read` → `list_blocks` path.
+
+7. **Known limits must be stated honestly**
+   - Wiki node deletion, wiki space rename, and some space-level operations may be unsupported or permission-limited.
+   - Do not pretend these are available when the API or current app permissions do not support them.
+
 ## Core Operations
 
 ### 1. Wiki Node CRUD
